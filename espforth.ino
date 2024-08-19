@@ -38,10 +38,18 @@
 /* All multiply-divide words cleaned up                                       */
 /******************************************************************************/
 
+/* Conversion to ESP32 API 3.0 based on document:                            */
+/* https://github.com/espressif/arduino-esp32/blob/master/docs/en/migration_guides/2.x_to_3.0.rst#id4 */
+
 #include "SPIFFS.h"
 #include <WiFi.h>
 #include <WebServer.h>
 #include "SPIFFS.h"
+
+// Pin number of inbuilt LED is 2 on ESP32-WROOM-32 DevKit
+// & ESP32--S3 WROOM  FREENOVE (with camera).
+// If the onboard LED is available uncomment and adjust the define.
+//#define LED_BUILTIN (2)
 
 const char* ssid = "SVFIG";//type your ssid
 const char* pass = "12345678";//type your password
@@ -428,23 +436,57 @@ void CheckSum() {
 /******************************************************************************/
 /* LEDC Software Fade */
 // use first channel of 16 channels (started from zero)
-#define LEDC_CHANNEL_0     0
-// use 13 bit precission for LEDC timer
-#define LEDC_TIMER_13_BIT  13
-// use 5000 Hz as a LEDC base frequency
-#define LEDC_BASE_FREQ     5000
-// fade LED PIN (replace with LED_BUILTIN constant for built-in LED)
-#define LED_PIN            5
-int brightness = 255;    // how bright the LED is
+#define LEDC_PIN     5
+//#define LEDC_PIN     (LED_BUILTIN)
 
-// Arduino like analogWrite
-// value has to be between 0 and valueMax
-void ledcAnalogWrite(uint8_t channel, uint32_t value, uint32_t valueMax = 255) {
-  // calculate duty, 8191 from 2 ^ 13 - 1
-  uint32_t duty = (8191 / valueMax) * min(value, valueMax);
-  // write duty to LEDC
-  ledcWrite(channel, duty);
-}
+
+// Example base frequency and resolution:
+// ESP32-WROOM-32 =  5000/13
+// ESP32-S3-WROOM-1 = 1000/8
+
+// Use 8 or 13 bit precision for LEDC timer
+//#define LEDC_TIMER_BIT_RESOLUTION  (13)
+#define LEDC_TIMER_BIT_RESOLUTION  (8)
+
+//#define LEDC_BASE_FREQ     (5000)
+#define LEDC_BASE_FREQ     (1000)
+// Max brightness  is 255 for Arduino analogWrite compatibilty.
+// #define MAX_BRIGHTNESS (255)
+#define MAX_BRIGHTNESS ((1UL << LEDC_TIMER_BIT_RESOLUTION) - 1)
+
+#ifdef ESP_ARDUINO_VERSION_MAJOR
+  #if ESP_ARDUINO_VERSION >= ESP_ARDUINO_VERSION_VAL(3, 0, 0)
+    // Arduino like analogWrite.
+    // This is already implmented as analogWrite, but without valueMax as a parameter.
+    // This definition provides more resolution.
+    // Brightness value has to be between 0 and maxBrightness, which by default is 255 or 8191.
+    void ledcAnalogWrite(uint8_t pin, uint32_t brightness, uint32_t maxBrightness = MAX_BRIGHTNESS) 
+    {
+      brightness = min(brightness, maxBrightness);
+      uint32_t dutyFactor = MAX_BRIGHTNESS * brightness / maxBrightness;
+      // write duty factor to LEDC
+      Serial.print("Pin: "); Serial.println(pin);
+      Serial.print("Brightness: "); Serial.println(brightness);
+      Serial.print("Duty factor: "); Serial.println(dutyFactor);
+      ledcWrite(pin, dutyFactor);
+    }
+  #else
+    // Arduino like analogWrite.
+    // Brightness value has to be between 0 and maxBrightness, which by default is 255 or 8191.
+    void ledcAnalogWrite(uint8_t channel, uint32_t brightness, uint32_t maxBrightness = MAX_BRIGHTNESS) 
+    {
+      brightness = min(brightness, maxBrightness);
+      uint32_t dutyFactor = MAX_BRIGHTNESS * brightness / maxBrightness;
+      // write duty factor to LEDC
+      Serial.print("Channel: "); Serial.println(channel);
+      Serial.print("Brightness: "); Serial.println(brightness);
+      Serial.print("Duty factor: "); Serial.println(dutyFactor);
+      ledcWrite(channel, dutyFactor);
+    }
+  #endif
+#else
+      // Code for Arduino-ESP32 API version 1.x
+#endif
 
 /******************************************************************************/
 /* PRIMITIVES                                                                 */
@@ -731,23 +773,78 @@ void peeek(void)
 void adc(void)
 {  top= (long) analogRead(top); }
 
-void pin(void)
-{  WP=top; pop;
-   ledcAttachPin(top,WP);
-   pop;
-}
+#ifdef ESP_ARDUINO_VERSION_MAJOR
+  #if ESP_ARDUINO_VERSION >= ESP_ARDUINO_VERSION_VAL(3, 0, 0)
+    // Code for Arduino-ESP32 API version 3.x
+    // Channel assignment is automatic, so it is longer exposed in the API.
+    // https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/peripherals/ledc.html#ledc-api-supported-range-frequency-duty-resolution
 
-void duty(void)
-{  WP=top; pop;
-   ledcAnalogWrite(WP,top,255);
-   pop;
-}
+     // Initialise pin with default frequencey and resolution.
+    // ( pin_number -- )
+    void pin(void)
+    {  
+      WP=top; pop;
+      ledcAttach(WP, LEDC_BASE_FREQ, LEDC_TIMER_BIT_RESOLUTION);
+    }
 
-void freq(void)
-{  WP=top; pop;
-   ledcSetup(WP,top,13);
-   pop;
-}
+    // Initialise pin with freqency and default resolution.
+    // ( frequency pin_number -- )
+    void freq(void)
+    { 
+      WP=top; pop;
+      ledcAttach(top, WP, LEDC_TIMER_BIT_RESOLUTION);
+      pop;
+    }
+
+  // Set LED intensity via its duty factor.
+  // ( duty_factor pin_number -- )
+  void duty(void)
+  {  
+    WP = top; pop;
+    Serial.print("TOS: "); Serial.println(WP);
+    long NOS = top;
+    Serial.print("NOS: "); Serial.println(NOS);
+    Serial.print("Max brightness: "); Serial.println(MAX_BRIGHTNESS);
+    ledcAnalogWrite(WP, NOS, MAX_BRIGHTNESS);
+    pop;
+  }
+#else
+    // Code for version 2.x
+   // Initialise pin with default frequency and resolution.
+    // ( pin_number channel_number -- )
+    void pin(void)
+    {  WP=top; pop;
+      ledcAttachPin(top, WP);
+      pop;
+    }
+
+    // Initialise pin with freqency and default resolution.
+    // ( frequency channel_number -- )
+    void freq(void)
+    {  
+      WP=top; pop;
+      ledcSetup(WP, top, LEDC_TIMER_BIT_RESOLUTION);
+      pop;
+    }
+
+    // Set LED intensity via its duty factor and its channel.
+    // ( duty_factor channel_number  -- )
+    void duty(void)
+    {  
+      WP = top; pop;
+      Serial.print("TOS: "); Serial.println(WP);
+      long NOS = top;
+      Serial.print("NOS: "); Serial.println(NOS);
+      Serial.print("Max brightness: "); Serial.println(MAX_BRIGHTNESS);
+      ledcAnalogWrite(WP, NOS, MAX_BRIGHTNESS);
+      pop;
+    }
+  #endif
+#else
+      // Code for version 1.x
+#endif
+
+
 
 void (*primitives[72])(void) = {
     /* case 0 */ nop,
@@ -1101,13 +1198,51 @@ void setup() {
   // if you get a connection, report back via serial:
   server.begin();
   Serial.println("Booting esp32Forth v6.3 ...");
+  
+  Serial.print("ESP32/Arduino API version: ");
+#ifdef ESP_ARDUINO_VERSION_MAJOR
+  Serial.print(ESP_ARDUINO_VERSION_MAJOR);
+  Serial.print(".");
+  Serial.print(ESP_ARDUINO_VERSION_MINOR);
+  Serial.print(".");
+  Serial.println( ESP_ARDUINO_VERSION_PATCH);
+#else
+  Serial.println("1.X.X");
+#endif
+  
+#ifdef ESP_ARDUINO_VERSION_MAJOR
+  #if ESP_ARDUINO_VERSION >= ESP_ARDUINO_VERSION_VAL(3, 0, 0)
+    // Code for Arduino-ESP32 API version 3.x
+    // Prepare pin 5 as source for variable brightness LED.
+    ledcAttach(LEDC_PIN, LEDC_BASE_FREQ, LEDC_TIMER_BIT_RESOLUTION);
+    Serial.println("Initialised pin for API 3.0");
+    // Set pin 2 or 5 LED to early full brightness.
+    // Default maximum is 255 0r 8191 so we set brightness to the full range.
+    ledcAnalogWrite(LEDC_PIN, MAX_BRIGHTNESS, MAX_BRIGHTNESS);
+    //analogWrite(LEDC_PIN, 8000);
+  #else
+    // Code for Arduino-ESP32 API version 2.x
+    // Setup timer and attach timer to a LED pin
+    const int channel = 0;
+    ledcSetup(channel, LEDC_BASE_FREQ, LEDC_TIMER_BIT_RESOLUTION);
+    ledcAttachPin(LEDC_PIN, channel);
+    Serial.println("Initialised pin for API 2.0");
+    // Set channel 0 LED to early full brightness.
+    // Default maximum is 255 0r 8191 so we set brightness to the full range.
+    ledcAnalogWrite(channel, MAX_BRIGHTNESS, MAX_BRIGHTNESS);
+    //analogWrite(LEDC_PIN, 8000);
+  #endif
+#else
+      // Code for Arduino-ESP32 API version 1.x
+#endif
 
-// Setup timer and attach timer to a led pin
-  ledcSetup(0, 100, LEDC_TIMER_13_BIT);
-  ledcAttachPin(5, 0);
-  ledcAnalogWrite(0, 250, brightness);
-  pinMode(2,OUTPUT);
-  digitalWrite(2, HIGH);   // turn the LED2 on 
+#ifdef LED_BUILTIN
+  // Turn on the inbuilt board LED.
+  pinMode(LED_BUILTIN, OUTPUT);
+  digitalWrite(LED_BUILTIN, HIGH);   // turn the LED2 on 
+#endif
+
+  // Motor control
   pinMode(16,OUTPUT);
   digitalWrite(16, LOW);   // motor1 forward
   pinMode(17,OUTPUT);
